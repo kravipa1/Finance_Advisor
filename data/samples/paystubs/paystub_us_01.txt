@@ -1,0 +1,10 @@
+Employer: ACME Corp
+Employee ID: E-00123
+Pay Period: 07/01/2025 - 07/31/2025
+Pay Date: 07/31/2025
+Gross Pay: $5,000.00
+Federal Tax: $500.00
+State Tax: $200.00
+Other Deductions: $0.00
+Net Pay: $4,300.00
+Currency: USD

@@ -1,0 +1,10 @@
+Employer: ABC Technologies Pvt Ltd
+Employee ID: IN-7788
+Pay Period: 01-07-2025 to 31-07-2025
+Pay Date: 31-07-2025
+Gross Pay: ₹120,000.00
+Professional Tax: ₹200.00
+Provident Fund: ₹4,800.00
+TDS: ₹7,500.00
+Net Pay: ₹107,500.00
+Currency: INR

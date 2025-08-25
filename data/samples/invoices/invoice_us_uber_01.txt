@@ -1,0 +1,6 @@
+Vendor: Uber
+Date: 2025-07-15
+Trip ID: TRP-9081
+Amount: $23.50
+Currency: USD
+Payment Method: Visa **** 2048

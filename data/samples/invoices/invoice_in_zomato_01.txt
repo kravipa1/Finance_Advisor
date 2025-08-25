@@ -1,0 +1,7 @@
+Vendor: Zomato
+Date: 15/07/2025
+Invoice #: INV-1092
+Subtotal: ₹310.00
+Taxes: ₹40.00
+Amount Due: ₹350.00
+Currency: INR

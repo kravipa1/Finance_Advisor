@@ -1,0 +1,19 @@
+# Virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# IDE settings
+.vscode/
+.idea/
+
+# Data
+data/interim/
+*.pdf
+*.jpg
+*.png
+
+# Logs & cache
+*.log
+*.DS_Store
+.cache/
