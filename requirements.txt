@@ -51,3 +51,10 @@ torchvision==0.23.0
 typing_extensions==4.15.0
 tzdata==2025.2
 virtualenv==20.34.0
+torch
+torchvision
+torchaudio
+easyocr
+pymupdf
+pillow
+opencv-python-headless
