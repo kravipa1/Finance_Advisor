@@ -58,3 +58,4 @@ easyocr
 pymupdf
 pillow
 opencv-python-headless
+pytest
