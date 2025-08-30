@@ -1,0 +1,16 @@
+# config.toml
+
+[paths]
+ocrdir   = "data/interim/ocr_text"
+normdir  = "data/interim/normalized_text"
+parsedir = "data/interim/parsed"
+
+[ocr]
+languages      = ["en"]
+gpu            = false
+min_confidence = 0.5
+paragraph      = true
+dpi            = 200
+
+[logging]
+level = "INFO"   # DEBUG, INFO, WARNING, ERROR
