@@ -1,0 +1,30 @@
+[project]
+name = "smart-finance-advisor"
+version = "0.1.0"
+description = "Smart Personal Finance & Expense Advisor (OCR → Normalize → Extract)"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Kushal Keshav Ravipati" }]
+dependencies = [
+    "easyocr",
+    "pymupdf",
+    "pillow",
+    "opencv-python-headless",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "invoke",
+    "pytest",
+]
+
+[project.scripts]
+finocr = "pipeline.runner:_cli"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# >>> NEW: explicit package discovery for our flat layout
+[tool.setuptools.packages.find]
+include = ["ocr*", "parser*", "pipeline*", "config*", "utils*"]
+exclude = ["tests*", "data*", "docs*", "examples*"]
