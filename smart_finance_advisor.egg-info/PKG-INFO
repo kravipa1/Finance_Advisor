@@ -1,0 +1,32 @@
+Metadata-Version: 2.4
+Name: smart-finance-advisor
+Version: 0.1.0
+Summary: Smart Personal Finance & Expense Advisor (OCR → Normalize → Extract)
+Author: Kushal Keshav Ravipati
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: easyocr
+Requires-Dist: pymupdf
+Requires-Dist: pillow
+Requires-Dist: opencv-python-headless
+Requires-Dist: torch
+Requires-Dist: torchvision
+Requires-Dist: torchaudio
+Requires-Dist: invoke
+Requires-Dist: pytest
+
+# Smart Finance Advisor
+
+A personal finance prototype that:
+- Extracts income & tax data from pay stubs (OCR)
+- Extracts expenses from invoices/receipts
+- Auto-categorizes into spend buckets
+- Provides nudges, cashflow forecasting, anomaly alerts, and gamification
+
+## Setup
+```bash
+git clone <your-repo-url>
+cd smart-finance-advisor
+python -m venv venv
+source venv/Scripts/activate   # (Git Bash)
+pip install -r requirements.txt

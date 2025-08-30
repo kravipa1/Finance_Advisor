@@ -1,0 +1,2 @@
+[console_scripts]
+finocr = pipeline.runner:_cli
