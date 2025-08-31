@@ -60,3 +60,4 @@ pillow
 opencv-python-headless
 pytest
 invoke
+python-dateutil

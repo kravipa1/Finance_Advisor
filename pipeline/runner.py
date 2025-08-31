@@ -17,7 +17,7 @@ from statistics import mean
 from typing import List, Tuple
 
 from config.loader import load_config
-from utils.logging_setup import setup_logging
+from sfa_utils.logging_setup import setup_logging
 
 from ocr.reader import Reader as OCRReader, OCRSpan
 from parser.normalizer import normalize_file as normalize_txt_file

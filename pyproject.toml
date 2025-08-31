@@ -26,5 +26,5 @@ build-backend = "setuptools.build_meta"
 
 # >>> NEW: explicit package discovery for our flat layout
 [tool.setuptools.packages.find]
-include = ["ocr*", "parser*", "pipeline*", "config*", "utils*"]
+include = ["ocr*", "parser*", "pipeline*", "config*", "sfa_utils*"]
 exclude = ["tests*", "data*", "docs*", "examples*"]

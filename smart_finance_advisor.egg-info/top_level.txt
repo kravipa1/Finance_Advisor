@@ -2,4 +2,4 @@ config
 ocr
 parser
 pipeline
-utils
+sfa_utils

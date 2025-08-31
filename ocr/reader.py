@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, cast, Any
 
 import numpy as np
 from PIL import Image, UnidentifiedImageError
@@ -104,15 +104,19 @@ class Reader:
             zoom = self.dpi / 72.0  # 72 dpi is PDF default
             mat = fitz.Matrix(zoom, zoom)
 
-            for i, page in enumerate(doc, start=1):
+            # Use explicit indexing so static type checkers don't complain.
+            for i in range(doc.page_count):
+                page = cast(Any, doc.load_page(i))
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 mode = "RGB" if pix.n < 4 else "RGBA"
-                img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+
+                # NOTE: pass a tuple (w, h) to satisfy Pylance
+                img = Image.frombytes(mode, (pix.width, pix.height), pix.samples)
                 if mode == "RGBA":
                     img = img.convert("RGB")
-                np_img = np.array(img)
 
-                spans.extend(self._run_easyocr(np_img, page=i))
+                np_img = np.array(img)
+                spans.extend(self._run_easyocr(np_img, page=i + 1))
         return spans
 
     def to_plaintext(self, spans: List[OCRSpan]) -> str:

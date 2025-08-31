@@ -12,7 +12,7 @@ Key tasks:
   inv clean
 """
 
-from invoke import task
+from invoke.tasks import task
 from pathlib import Path
 import shutil
 import sys
