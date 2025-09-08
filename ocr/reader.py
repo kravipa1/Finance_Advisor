@@ -20,6 +20,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 import fitz  # PyMuPDF
 import easyocr
+import cv2
 
 
 # ---------------------------- Data structures ----------------------------
@@ -36,6 +37,18 @@ class OCRSpan:
 
 
 # ------------------------------- Reader ----------------------------------
+
+
+# put this above the class or anywhere at module top level
+def _preprocess(np_img: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(np_img, cv2.COLOR_RGB2GRAY)
+    gray = cv2.bilateralFilter(gray, d=7, sigmaColor=50, sigmaSpace=50)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    thr = cv2.adaptiveThreshold(
+        gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 31, 10
+    )
+    return cv2.cvtColor(thr, cv2.COLOR_GRAY2RGB)
 
 
 class Reader:
@@ -92,6 +105,7 @@ class Reader:
             raise ValueError(f"Cannot open image: {image_path}") from e
 
         np_img = np.array(img)
+        np_img = _preprocess(np_img)
         spans = self._run_easyocr(np_img, page=1)
         return spans
 
@@ -116,6 +130,7 @@ class Reader:
                     img = img.convert("RGB")
 
                 np_img = np.array(img)
+                np_img = _preprocess(np_img)
                 spans.extend(self._run_easyocr(np_img, page=i + 1))
         return spans
 

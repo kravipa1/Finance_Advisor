@@ -1,281 +1,423 @@
 # parser/extractor.py
-"""
-Extractor v2:
-- Scores doc type (invoice vs paystub)
-- Normalizes amounts & dates
-- Extracts invoice line items
-- Emits structured JSON
-
-CLI:
-  python -m parser.extractor --input data/interim/normalized_text/June_Forex.txt --outdir data/interim/parsed
-  python -m parser.extractor --indir data/interim/normalized_text --outdir data/interim/parsed
-"""
 from __future__ import annotations
-
 import argparse
 import json
 import re
-from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Any, Optional, List
 
-from sfa_utils.normalizers import (
-    detect_currency,
-    normalize_amount,
-    to_iso_date,
-    DATE_RX,
-)
 from parser.doc_type import score as score_doc_type
 from parser.lineitems import extract_line_items
+from parser.vendor import guess_vendor
+from sfa_utils.normalizers import normalize_amount, to_iso_date
 
-RE_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-RE_PHONE = re.compile(
-    r"\b(?:\+?\d{1,3}[\s-]?)?(?:\(?\d{3}\)?[\s-]?)?\d{3}[\s-]?\d{4}\b"
+# --------------------- regex helpers ---------------------
+
+MONTHS = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
+DATE_RX = re.compile(
+    rf"\b(?:\d{{1,2}}[-/]\d{{1,2}}[-/]\d{{2,4}}|\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}}|{MONTHS}\s+\d{{1,2}},?\s+\d{{2,4}})\b",
+    re.IGNORECASE,
 )
 
 RE_INVOICE_NO = re.compile(
-    r"\b(?:invoice|inv|bill)\s*(?:no|number|#|:)?\s*([A-Za-z0-9\-_/]+)", re.IGNORECASE
+    r"\b(?:invoice|inv|bill)\s*(?:no|number|#|:)?\s*([A-Za-z0-9][A-Za-z0-9_.\-]{1,30})\b",
+    re.IGNORECASE,
 )
 RE_PO_NO = re.compile(
-    r"\b(?:po|purchase\s*order)\s*(?:no|number|#|:)?\s*([A-Za-z0-9\-_/]+)",
+    r"\b(?:po|purchase\s*order)\s*(?:no|number|#|:)?\s*([A-Za-z0-9][A-Za-z0-9_.\-]{1,30})\b",
     re.IGNORECASE,
 )
 
+RE_SUBTOTAL = re.compile(r"\b(?:sub\s*total|subtotal)\b[:\s]*([^\n]+)", re.IGNORECASE)
+RE_TAX = re.compile(r"\b(?:tax|taxes)\b[:\s]*([^\n]+)", re.IGNORECASE)
+RE_SALES_TAX = re.compile(r"\b(?:sales\s*tax)\b[:\s]*([^\n]+)", re.IGNORECASE)
+RE_DISCOUNT = re.compile(
+    r"\b(?:discount|promo|coupon|savings)\b[:\s]*([^\n]+)", re.IGNORECASE
+)
+
+# Ignore "Total Items/Savings/Price"
 RE_TOTAL = re.compile(
-    r"\b(?:total|amount\s*due|balance\s*due)\b[:\s]*([^\n]+)", re.IGNORECASE
-)
-RE_SUBTOTAL = re.compile(r"\bsubtotal\b[:\s]*([^\n]+)", re.IGNORECASE)
-RE_TAX = re.compile(r"\b(?:tax|gst|vat)\b[:\s]*([^\n]+)", re.IGNORECASE)
-RE_DISCOUNT = re.compile(r"\bdiscount\b[:\s]*([^\n]+)", re.IGNORECASE)
-
-RE_PAY_PERIOD = re.compile(
-    rf"\bpay\s*period\b[:\s-]*({DATE_RX.pattern})\s*(?:to|-|through|–|—)\s*({DATE_RX.pattern})",
+    r"\b(?:order\s*total|amount\s*due|balance\s*due|total)\b(?!\s*(?:items|savings|price))[:\s]*([^\n]+)",
     re.IGNORECASE,
 )
-RE_PAY_DATE = re.compile(rf"\bpay\s*date\b[:\s-]*({DATE_RX.pattern})", re.IGNORECASE)
-RE_GROSS_PAY = re.compile(r"\bgross\s*pay\b[:\s]*([^\n]+)", re.IGNORECASE)
-RE_NET_PAY = re.compile(r"\bnet\s*pay\b[:\s]*([^\n]+)", re.IGNORECASE)
+RE_RECEIPT_DATE = re.compile(
+    rf"\b(?:receipt|order)\b.*?\b({DATE_RX.pattern})", re.IGNORECASE
+)
+RE_RECEIPT_FROM = re.compile(rf"\breceipt\s+from\s+({DATE_RX.pattern})", re.IGNORECASE)
 
-ADDRESS_HINT = re.compile(
-    r"\b(road|rd\.?|street|st\.?|avenue|ave\.?|lane|ln\.?|suite|ste\.?|floor|flr\.?|tempe|phoenix|hyderabad)\b",
+# Prefer price-like amounts (currency symbol or mandatory decimals)
+MONEY_PRICE_RX = re.compile(
+    r"(?:[$€₹]|US\$|USD|EUR|INR)\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{2})"
+    r"|"
+    r"\b-?\d{1,3}(?:,\d{3})*\.\d{2}\b",
     re.IGNORECASE,
 )
 
+# "Total" context bonus; include 'amount' so "Amount 17.94" can help
+TOTAL_NEAR_RX = re.compile(
+    r"\b(total|amount\s*due|balance\s*due|payable|amount)\b", re.I
+)
 
-def _lines(text: str) -> List[str]:
-    return [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+# contexts to avoid choosing as total (added 'calculated')
+NEG_TOTAL_CONTEXT = re.compile(
+    r"(?:items|savings|authorization|auth|change|tip\s?suggest|barcode|reference|subtotal|coupon|price|calculated)",
+    re.IGNORECASE,
+)
+
+# --------------------- tiny helpers ---------------------
 
 
-def _first_match(rx: re.Pattern, text: str) -> Optional[str]:
+def _first(rx: re.Pattern, text: str) -> Optional[str]:
     m = rx.search(text)
-    if not m:
+    if not m or (m.lastindex or 0) < 1:
         return None
-    return (m.group(1) or m.group(0)).strip()
+    g = m.group(1)
+    return g.strip() if g is not None else None
 
 
-def _all(rx: re.Pattern, text: str) -> List[str]:
-    return list(
-        dict.fromkeys(  # unique in order
-            (m.group(1) if m.lastindex else m.group(0)).strip()
-            for m in rx.finditer(text)
-        )
-    )
+def _amt_json(raw: Optional[str]) -> Dict[str, Any]:
+    a = normalize_amount(raw) if raw else None
+    return {
+        "raw": (a.raw if a else raw),
+        "value": (float(a.value) if (a and a.value is not None) else None),
+        "currency": (a.currency if a else None),
+    }
 
 
-def _guess_header_name(lines: List[str]) -> Optional[str]:
-    window = lines[:15]
-    for i, line in enumerate(window):
-        s = line.strip()
-        if not s:
-            continue
-        if (
-            len(s) <= 60
-            and s.upper() == s
-            and re.search(r"[A-Z]", s)
-            and not re.search(r"\d", s)
-        ):
-            return s
-        if i + 1 < len(window):
-            nxt = window[i + 1].strip()
-            if ADDRESS_HINT.search(nxt) and 2 <= len(s.split()) <= 6:
-                return s
-    for s in window:
-        s = s.strip()
-        if s:
-            return s
+def _coalesce(*vals):
+    for v in vals:
+        if v:
+            return v
     return None
 
 
-@dataclass
-class AmountJSON:
-    raw: Optional[str]
-    value: Optional[float]
-    currency: Optional[str]
+# --------------------- labelled totals (bottom-up) ---------------------
 
 
-def _amount_json(s: Optional[str]) -> AmountJSON:
-    a = normalize_amount(s or "")
-    return AmountJSON(
-        raw=a.raw or None,
-        value=float(a.value) if a.value is not None else None,
-        currency=a.currency,
-    )
+def _labelled_total_from_bottom(lines: List[str]) -> Optional[str]:
+    for raw in reversed(lines[-60:]):
+        s = " ".join(raw.strip().split())
+        if not re.search(r"\btotal\b", s, re.I):
+            continue
+        if re.search(r"\b(items|savings|price)\b", s, re.I):
+            continue
+        m = MONEY_PRICE_RX.search(s)
+        if m:
+            return m.group(0)
+    return None
 
 
-# --------------------- INVOICE ---------------------
+def _labelled_total_split(lines: List[str]) -> Optional[str]:
+    """
+    Find 'Total' on one line and the amount on one of the next two lines.
+    """
+    lo = max(0, len(lines) - 60)
+    for i in range(len(lines) - 1, lo - 1, -1):
+        s = " ".join(lines[i].strip().split())
+        if not re.search(r"\btotal\b", s, re.I):
+            continue
+        if re.search(r"\b(items|savings|price)\b", s, re.I):
+            continue
+        # same line?
+        m0 = MONEY_PRICE_RX.search(s)
+        if m0:
+            return m0.group(0)
+        # next lines
+        for k in (1, 2):
+            j = i + k
+            if j >= len(lines):
+                break
+            nxt = lines[j]
+            if re.search(r"\b(items|savings|price)\b", nxt, re.I):
+                continue
+            m = MONEY_PRICE_RX.search(nxt)
+            if m:
+                return m.group(0)
+    return None
 
 
-def extract_invoice(text: str) -> Dict:
-    lines = _lines(text)
-    vendor = _guess_header_name(lines)
+# --------------------- amount-first fallback ---------------------
 
-    emails = _all(RE_EMAIL, text)
-    phones = _all(RE_PHONE, text)
-    currency = detect_currency(text)
 
-    invoice_no = _first_match(RE_INVOICE_NO, text)
-    po_no = _first_match(RE_PO_NO, text)
+def _all_amounts_with_lines(
+    lines: List[str],
+) -> List[tuple[int, float, str, str, bool]]:
+    hits: List[tuple[int, float, str, str, bool]] = []
+    for i, ln in enumerate(lines):
+        for m in MONEY_PRICE_RX.finditer(ln):
+            raw = m.group(0)
+            has_symbol = bool(re.match(r"\s*(?:[$€₹]|US\$|USD|EUR|INR)", raw, re.I))
+            a = normalize_amount(raw)
+            if a and a.value is not None:
+                hits.append((i, float(a.value), ln, raw, has_symbol))
+    return hits
 
-    invoice_date_raw = _first_match(
-        re.compile(
-            rf"\b(?:invoice\s*date|date)\b[:\s-]*({DATE_RX.pattern})", re.IGNORECASE
+
+def _pick_total_fallback(lines: List[str]) -> Optional[str]:
+    hits = _all_amounts_with_lines(lines)
+    if not hits:
+        return None
+
+    n = max(1, len(lines) - 1)
+    scored: List[tuple[float, str]] = []
+    for i, val, ln, raw, has_symbol in hits:
+        near = " ".join(lines[max(0, i - 1) : min(len(lines), i + 2)])
+        if NEG_TOTAL_CONTEXT.search(ln) or NEG_TOTAL_CONTEXT.search(near):
+            continue
+        depth = i / n
+        tot_bonus = 0.35 if TOTAL_NEAR_RX.search(near) else 0.0
+        sym_bonus = 0.15 if has_symbol else 0.0
+        mag = min(1.0, (val / 500.0)) ** 0.5
+        score = 0.6 * depth + 0.25 * mag + tot_bonus + sym_bonus
+        scored.append((score, raw))
+    if not scored:
+        return None
+    return max(scored, key=lambda t: t[0])[1]
+
+
+# --------------------- reconciliation ---------------------
+
+
+def _amount_appears_in_text(value: float, lines: List[str]) -> bool:
+    """Check if a formatted amount (xx.xx) appears anywhere in the text."""
+    pat = re.compile(rf"\b{value:.2f}\b")
+    for ln in lines[-120:]:
+        if pat.search(ln):
+            return True
+    return False
+
+
+def _reconcile_total(
+    subtotal: Dict[str, Any],
+    tax: Dict[str, Any],
+    discount: Dict[str, Any],
+    total: Dict[str, Any],
+    lines: List[str],
+) -> Dict[str, Any]:
+    """
+    Prefer arithmetic if subtotal+tax looks reliable; avoid double-discount.
+    Strategy:
+      - If s and t present, compute EXPECTED_ST = s + t.
+      - If d present, also compute EXPECTED_STD = s + t + d.
+      - If the labelled/fallback total is missing or far from EXPECTED_ST,
+        and EXPECTED_ST appears in text, choose EXPECTED_ST.
+      - Otherwise, if EXPECTED_STD appears and total is missing, choose it.
+    """
+    s = subtotal.get("value")
+    t = tax.get("value")
+    d = discount.get("value")
+    tv = total.get("value")
+
+    expected_st = None
+    if s is not None and t is not None:
+        expected_st = round((s or 0.0) + (t or 0.0), 2)
+
+    expected_std = None
+    if s is not None and t is not None and d is not None:
+        expected_std = round((s or 0.0) + (t or 0.0) + (d or 0.0), 2)
+
+    # If total missing, try best candidate by presence in text.
+    if tv is None:
+        cand = None
+        if expected_st is not None and _amount_appears_in_text(expected_st, lines):
+            cand = expected_st
+        elif expected_std is not None and _amount_appears_in_text(expected_std, lines):
+            cand = expected_std
+        if cand is not None:
+            ccy = (
+                total.get("currency")
+                or subtotal.get("currency")
+                or tax.get("currency")
+                or discount.get("currency")
+            )
+            return {"raw": f"{cand:.2f}", "value": cand, "currency": ccy}
+        return total
+
+    # If total present but deviates strongly from expected_st (most receipts: total = s + t),
+    # and expected_st appears in text, trust expected_st.
+    if (
+        expected_st is not None
+        and abs(tv - expected_st) > 0.5
+        and _amount_appears_in_text(expected_st, lines)
+    ):
+        ccy = total.get("currency") or subtotal.get("currency") or tax.get("currency")
+        return {"raw": f"{expected_st:.2f}", "value": expected_st, "currency": ccy}
+
+    return total
+
+
+# --------------------- core extractors ---------------------
+
+
+def extract_invoice(text: str) -> Dict[str, Any]:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+
+    # vendor (no whitelist)
+    vendor = guess_vendor(lines)
+
+    # IDs
+    inv_no = _first(RE_INVOICE_NO, text)
+    po_no = _first(RE_PO_NO, text)
+
+    # dates (single assignment; includes "receipt from ...")
+    invoice_date_raw = _coalesce(
+        _first(
+            re.compile(
+                rf"\b(?:invoice\s*date|date)\b[:\s-]*({DATE_RX.pattern})", re.IGNORECASE
+            ),
+            text,
         ),
-        text,
+        _first(RE_RECEIPT_DATE, text),
+        _first(RE_RECEIPT_FROM, text),
     )
-    due_date_raw = _first_match(
+    due_date_raw = _first(
         re.compile(rf"\b(?:due\s*date)\b[:\s-]*({DATE_RX.pattern})", re.IGNORECASE),
         text,
     )
+    invoice_date = {"raw": invoice_date_raw, "iso": to_iso_date(invoice_date_raw)}
+    due_date = {"raw": due_date_raw, "iso": to_iso_date(due_date_raw)}
 
-    subtotal = _amount_json(_first_match(RE_SUBTOTAL, text))
-    tax = _amount_json(_first_match(RE_TAX, text))
-    discount = _amount_json(_first_match(RE_DISCOUNT, text))
-    total = _amount_json(_first_match(RE_TOTAL, text))
+    # amounts (keyword first)
+    subtotal = _amt_json(_first(RE_SUBTOTAL, text))
+    tax = _amt_json(_coalesce(_first(RE_TAX, text), _first(RE_SALES_TAX, text)))
+    discount = _amt_json(_first(RE_DISCOUNT, text))
+    total = _amt_json(_first(RE_TOTAL, text))
 
-    items = extract_line_items(lines)
+    # totals sequence: labelled (same line) → split-line → fallback → reconcile
+    if total["value"] is None:
+        labelled_bottom = _labelled_total_from_bottom(lines)
+        if labelled_bottom:
+            total = _amt_json(labelled_bottom)
+    if total["value"] is None:
+        split_total = _labelled_total_split(lines)
+        if split_total:
+            total = _amt_json(split_total)
+    if total["value"] is None:
+        fallback = _pick_total_fallback(lines)
+        if fallback:
+            total = _amt_json(fallback)
+
+    total = _reconcile_total(subtotal, tax, discount, total, lines)
+
+    # line items
+    line_items = extract_line_items(lines)
+
+    # currency hint
+    any_amount = next(
+        (a for a in [subtotal, tax, discount, total] if a["currency"]), None
+    )
+    currency_hint = any_amount["currency"] if any_amount else None
+
+    # sanity
+    amount_hits = re.findall(
+        r"(?:[$€₹]|US\$|USD|EUR|INR)?\s?-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?", text
+    )
+    has_money = any("." in a or "$" in a or "€" in a or "₹" in a for a in amount_hits)
+    sanity = {
+        "low_confidence": (
+            total["value"] is None
+            and subtotal["value"] is None
+            and tax["value"] is None
+        )
+        and not has_money,
+        "amount_hits": len(amount_hits),
+    }
 
     return {
         "kind": "invoice",
         "vendor": vendor,
-        "invoice_number": invoice_no,
+        "invoice_number": inv_no,
         "po_number": po_no,
-        "invoice_date": {"raw": invoice_date_raw, "iso": to_iso_date(invoice_date_raw)},
-        "due_date": {"raw": due_date_raw, "iso": to_iso_date(due_date_raw)},
-        "subtotal": asdict(subtotal),
-        "tax": asdict(tax),
-        "discount": asdict(discount),
-        "total": asdict(total),
-        "currency_hint": currency,
-        "emails": emails,
-        "phones": phones,
-        "line_items": items,
+        "invoice_date": invoice_date,
+        "due_date": due_date,
+        "subtotal": subtotal,
+        "tax": tax,
+        "discount": discount,
+        "total": total,
+        "currency_hint": currency_hint,
+        "emails": [],
+        "phones": [],
+        "line_items": line_items,
+        "sanity": sanity,
     }
 
 
-# --------------------- PAYSTUB ---------------------
+def extract_paystub(text: str) -> Dict[str, Any]:
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    employer = guess_vendor(lines)
 
+    pay_period = _first(
+        re.compile(
+            rf"\bpay\s*period\b.*?({DATE_RX.pattern}).*?({DATE_RX.pattern})",
+            re.IGNORECASE,
+        ),
+        text,
+    )
+    net = _amt_json(
+        _first(re.compile(r"\bnet\s*pay\b[:\s]*([^\n]+)", re.IGNORECASE), text)
+    )
+    gross = _amt_json(
+        _first(re.compile(r"\bgross\s*pay\b[:\s]*([^\n]+)", re.IGNORECASE), text)
+    )
 
-def extract_paystub(text: str) -> Dict:
-    lines = _lines(text)
-    employer = _guess_header_name(lines)
-    employee = None
-    for i, ln in enumerate(lines[:40]):
-        if re.search(r"\bemployee\b[:\s-]*", ln, re.IGNORECASE):
-            after = re.sub(r"(?i)\bemployee\b[:\s-]*", "", ln).strip()
-            if after:
-                employee = after
-            else:
-                for j in range(i + 1, min(i + 5, len(lines))):
-                    s = lines[j].strip()
-                    if s:
-                        employee = s
-                        break
-            break
+    amount_hits = re.findall(
+        r"(?:[$€₹]|US\$|USD|EUR|INR)?\s?-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?", text
+    )
+    has_money = any("." in a or "$" in a or "€" in a or "₹" in a for a in amount_hits)
 
-    emails = _all(RE_EMAIL, text)
-    phones = _all(RE_PHONE, text)
-    currency = detect_currency(text)
-
-    m = RE_PAY_PERIOD.search(text)
-    p_start_raw = m.group(1) if m else None
-    p_end_raw = m.group(2) if m else None
-    pay_date_raw = _first_match(RE_PAY_DATE, text)
-
-    gross = _amount_json(_first_match(RE_GROSS_PAY, text))
-    net = _amount_json(_first_match(RE_NET_PAY, text))
+    sanity = {
+        "low_confidence": (net["value"] is None and gross["value"] is None)
+        and not has_money,
+        "amount_hits": len(amount_hits),
+    }
 
     return {
         "kind": "paystub",
         "employer": employer,
-        "employee": employee,
-        "pay_period_start": {"raw": p_start_raw, "iso": to_iso_date(p_start_raw)},
-        "pay_period_end": {"raw": p_end_raw, "iso": to_iso_date(p_end_raw)},
-        "pay_date": {"raw": pay_date_raw, "iso": to_iso_date(pay_date_raw)},
-        "gross_pay": asdict(gross),
-        "net_pay": asdict(net),
-        "currency_hint": currency,
-        "emails": emails,
-        "phones": phones,
+        "pay_period": pay_period,
+        "gross_pay": gross,
+        "net_pay": net,
+        "line_items": [],
+        "sanity": sanity,
     }
 
 
-# --------------------- ENTRY ---------------------
+# --------------------- public API ---------------------
 
 
-def extract_from_text(text: str) -> Dict:
-    s = score_doc_type(text)
-    if s.kind == "invoice":
-        out = extract_invoice(text)
+def extract_from_text(text: str) -> Dict[str, Any]:
+    sc = score_doc_type(text)
+    if sc.kind == "invoice":
+        data = extract_invoice(text)
+    elif sc.kind == "paystub":
+        data = extract_paystub(text)
     else:
-        out = extract_paystub(text)
-    out["_doc_type_score"] = {"invoice": s.invoice, "paystub": s.paystub}
+        data = extract_invoice(text)
+    data["_doc_type_score"] = {"invoice": sc.invoice, "paystub": sc.paystub}
+    return data
+
+
+def extract_file(input_txt: Path, outdir: Path) -> Path:
+    text = Path(input_txt).read_text(encoding="utf-8", errors="ignore")
+    data = extract_from_text(text)
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / (Path(input_txt).stem + ".json")
+    out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return out
 
 
-def extract_file(input_path: Path, outdir: Path) -> Path:
-    text = input_path.read_text(encoding="utf-8", errors="ignore")
-    data = extract_from_text(text)
-    outdir.mkdir(parents=True, exist_ok=True)
-    out_path = outdir / (input_path.stem + ".json")
-    out_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
-    return out_path
-
-
-def batch_extract(indir: Path, outdir: Path) -> List[Path]:
-    outputs: List[Path] = []
-    for p in sorted(indir.glob("*.txt")):
-        outputs.append(extract_file(p, outdir))
-    return outputs
+# --------------------- CLI (optional) ---------------------
 
 
 def _cli():
-    parser = argparse.ArgumentParser(
-        description="Extract key fields from normalized OCR text (v2)"
+    ap = argparse.ArgumentParser(
+        description="Parse normalized .txt into structured JSON (invoice/paystub)."
     )
-    g = parser.add_mutually_exclusive_group(required=True)
-    g.add_argument("--input", help="Path to a single normalized .txt file")
-    g.add_argument("--indir", help="Directory of normalized .txt files to batch")
-    parser.add_argument(
-        "--outdir", default="data/interim/parsed", help="Where to write JSON outputs"
-    )
-    args = parser.parse_args()
-
-    outdir = Path(args.outdir)
-
-    if args.input:
-        inp = Path(args.input)
-        if not inp.exists():
-            raise FileNotFoundError(f"Input not found: {inp}")
-        out = extract_file(inp, outdir)
-        print(f"[OK] Parsed -> {out}")
-    else:
-        indir = Path(args.indir)
-        if not indir.exists():
-            raise FileNotFoundError(f"Input dir not found: {indir}")
-        outs = batch_extract(indir, outdir)
-        print(f"[OK] Parsed {len(outs)} files -> {outdir}")
+    ap.add_argument("--input", required=True, help="Path to a normalized .txt file")
+    ap.add_argument("--outdir", required=True, help="Directory to write .json")
+    args = ap.parse_args()
+    p = extract_file(Path(args.input), Path(args.outdir))
+    print(f"[OK] Extracted -> {p}")
 
 
 if __name__ == "__main__":

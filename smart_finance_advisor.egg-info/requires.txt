@@ -1,9 +1,0 @@
-easyocr
-pymupdf
-pillow
-opencv-python-headless
-torch
-torchvision
-torchaudio
-invoke
-pytest

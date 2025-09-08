@@ -61,3 +61,6 @@ opencv-python-headless
 pytest
 invoke
 python-dateutil
+streamlit
+sqlite3
+cv2

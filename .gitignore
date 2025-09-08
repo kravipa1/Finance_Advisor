@@ -1,19 +1,14 @@
-# Virtual environment
-venv/
-__pycache__/
-*.pyc
-
-# IDE settings
-.vscode/
-.idea/
-
-# Data
+cat >> .gitignore << 'EOF'
+# app data / outputs
+data/app.db
+data/line_items.csv
 data/interim/
-*.pdf
-*.jpg
-*.png
-
-# Logs & cache
-*.log
-*.DS_Store
-.cache/
+data/uploads/
+**/__pycache__/
+.ui/
+.streamlit/
+# venvs (just in case)
+venv/
+.eggs/
+*.egg-info/
+EOF

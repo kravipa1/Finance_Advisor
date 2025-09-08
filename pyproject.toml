@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 finocr = "pipeline.runner:_cli"
+finproc  = "sfa_cli.process:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
@@ -26,5 +27,5 @@ build-backend = "setuptools.build_meta"
 
 # >>> NEW: explicit package discovery for our flat layout
 [tool.setuptools.packages.find]
-include = ["ocr*", "parser*", "pipeline*", "config*", "sfa_utils*"]
+include = ["ocr*", "parser*", "pipeline*", "config*", "sfa_utils*", "sfa_cli*", "storage*"]
 exclude = ["tests*", "data*", "docs*", "examples*"]

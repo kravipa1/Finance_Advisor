@@ -1,5 +1,0 @@
-config
-ocr
-parser
-pipeline
-sfa_utils
