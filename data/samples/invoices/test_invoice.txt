@@ -1,0 +1,7 @@
+My Vendor
+Date: 2025-07-01
+Items:
+- Service 1 x 500.00 = 500.00
+Subtotal: 500.00
+Tax: 50.00
+Total: 550.00

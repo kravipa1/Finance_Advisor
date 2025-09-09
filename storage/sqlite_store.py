@@ -1,174 +1,184 @@
 # storage/sqlite_store.py
 from __future__ import annotations
-import json
 import sqlite3
-from pathlib import Path
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List
 
 
-def init_db(db_path: Path) -> None:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(db_path) as con:
-        con.execute("PRAGMA foreign_keys=ON")  # <— add this
-        cur = con.cursor()
-        cur.execute(
-            """
-        CREATE TABLE IF NOT EXISTS documents (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            kind TEXT,
-            vendor_or_employer TEXT,
-            invoice_number TEXT,
-            po_number TEXT,
-            invoice_date_iso TEXT,
-            due_date_iso TEXT,
-            gross_pay REAL,
-            net_pay REAL,
-            subtotal REAL,
-            tax REAL,
-            discount REAL,
-            total REAL,
-            currency_hint TEXT,
-            category TEXT,
-            raw_json TEXT NOT NULL
-        )"""
-        )
-        cur.execute(
-            """
-        CREATE TABLE IF NOT EXISTS line_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            document_id INTEGER NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-            idx INTEGER,
-            qty REAL,
-            description TEXT,
-            unit_price_value REAL,
-            unit_price_currency TEXT,
-            line_total_value REAL,
-            line_total_currency TEXT,
-            category TEXT
-        )"""
-        )
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_line_items_doc ON line_items(document_id)"
-        )
-        con.commit()
+def open_conn(path: str = "data/finance.sqlite") -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
-def _num(val: Any) -> Optional[float]:
-    try:
-        if val is None:
-            return None
-        return float(val)
-    except Exception:
-        return None
+CREATE_RECEIPTS = """
+CREATE TABLE IF NOT EXISTS receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vendor TEXT,
+    date TEXT,
+    total REAL,
+    subtotal REAL,
+    tax REAL,
+    tip REAL,
+    reconciled_used INTEGER DEFAULT 0,
+    items_subtotal_diff REAL DEFAULT 0.0,
+    items_subtotal_pct REAL DEFAULT 0.0,
+    norm_hash TEXT UNIQUE,
+    raw_text TEXT
+);
+"""
 
 
-def _amount_val(d: Optional[Dict[str, Any]]) -> Optional[float]:
-    if not isinstance(d, dict):
-        return None
-    return _num(d.get("value"))
+def ensure_schema(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    cur.execute(CREATE_RECEIPTS)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_receipts_date ON receipts(date)")
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_norm_hash ON receipts(norm_hash)"
+    )
+    conn.commit()
 
 
-def _amount_ccy(d: Optional[Dict[str, Any]]) -> Optional[str]:
-    if not isinstance(d, dict):
-        return None
-    return d.get("currency")
+SCHEMA_ALTER_SANITY = [
+    "ALTER TABLE receipts ADD COLUMN reconciled_used INTEGER DEFAULT 0;",
+    "ALTER TABLE receipts ADD COLUMN items_subtotal_diff REAL DEFAULT 0.0;",
+    "ALTER TABLE receipts ADD COLUMN items_subtotal_pct REAL DEFAULT 0.0;",
+]
+
+SCHEMA_ALTER_HASH = [
+    "ALTER TABLE receipts ADD COLUMN norm_hash TEXT;",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_receipts_norm_hash ON receipts(norm_hash);",
+]
 
 
-def save_document(db_path: Path, doc: Dict[str, Any]) -> int:
-    init_db(db_path)
+def migrate_add_sanity_flags(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    for stmt in SCHEMA_ALTER_SANITY:
+        try:
+            cur.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
 
-    # >>> define all values FIRST
-    kind = doc.get("kind")
-    vendor_or_employer = (
-        doc.get("vendor") if kind == "invoice" else doc.get("employer")
-    ) or None
 
-    invoice_number = doc.get("invoice_number") or None
-    po_number = doc.get("po_number") or None
-    invoice_date_iso = (doc.get("invoice_date") or {}).get("iso")
-    due_date_iso = (doc.get("due_date") or {}).get("iso")
+def migrate_add_norm_hash(conn: sqlite3.Connection) -> None:
+    cur = conn.cursor()
+    for stmt in SCHEMA_ALTER_HASH:
+        try:
+            cur.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()
 
-    gross_pay = _amount_val(doc.get("gross_pay"))
-    net_pay = _amount_val(doc.get("net_pay"))
-    subtotal = _amount_val(doc.get("subtotal"))
-    tax = _amount_val(doc.get("tax"))
-    discount = _amount_val(doc.get("discount"))
-    total = _amount_val(doc.get("total"))
 
-    currency_hint = doc.get("currency_hint")
-    category = doc.get("category")
-    raw_json = json.dumps(doc, ensure_ascii=False)
+def exists_by_hash(conn: sqlite3.Connection, norm_hash: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM receipts WHERE norm_hash = ? LIMIT 1", (norm_hash,))
+    return cur.fetchone() is not None
 
-    with sqlite3.connect(db_path) as con:
-        con.execute("PRAGMA foreign_keys=ON")
-        cur = con.cursor()
-        cur.execute(
-            """
-        INSERT INTO documents (
-            kind, vendor_or_employer, invoice_number, po_number,
-            invoice_date_iso, due_date_iso, gross_pay, net_pay,
-            subtotal, tax, discount, total, currency_hint, category, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+
+def delete_by_hash(conn: sqlite3.Connection, norm_hash: str) -> int:
+    cur = conn.cursor()
+    cur.execute("DELETE FROM receipts WHERE norm_hash = ?", (norm_hash,))
+    conn.commit()
+    return cur.rowcount
+
+
+def insert_receipt(conn: sqlite3.Connection, row: Dict[str, Any]) -> int:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO receipts
+            (vendor, date, total, subtotal, tax, tip,
+             reconciled_used, items_subtotal_diff, items_subtotal_pct,
+             norm_hash, raw_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-            (
-                kind,
-                vendor_or_employer,
-                invoice_number,
-                po_number,
-                invoice_date_iso,
-                due_date_iso,
-                gross_pay,
-                net_pay,
-                subtotal,
-                tax,
-                discount,
-                total,
-                currency_hint,
-                category,
-                raw_json,
-            ),
-        )
-
-        # guard Optional[int]
-        doc_id_val: Optional[int] = cur.lastrowid
-        if doc_id_val is None:
-            raise RuntimeError("SQLite did not return lastrowid after insert.")
-        doc_id = int(doc_id_val)
-
-        # line items
-        for idx, it in enumerate(doc.get("line_items") or []):
-            desc = it.get("description") or it.get("desc")
-            qty = _num(it.get("qty"))
-            upv = _amount_val(it.get("unit_price"))
-            upc = _amount_ccy(it.get("unit_price"))
-            ltv = _amount_val(it.get("line_total"))
-            ltc = _amount_ccy(it.get("line_total"))
-            cat = it.get("category")
-            cur.execute(
-                """
-            INSERT INTO line_items (
-                document_id, idx, qty, description,
-                unit_price_value, unit_price_currency,
-                line_total_value, line_total_currency, category
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-                (doc_id, idx, qty, desc, upv, upc, ltv, ltc, cat),
-            )
-
-        con.commit()
-    return doc_id
+        (
+            row.get("vendor"),
+            row.get("date"),
+            row.get("total"),
+            row.get("subtotal"),
+            row.get("tax"),
+            row.get("tip"),
+            row.get("reconciled_used", 0),
+            row.get("items_subtotal_diff", 0.0),
+            row.get("items_subtotal_pct", 0.0),
+            row.get("norm_hash"),
+            row.get("raw_text"),
+        ),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
 
 
-def fetch_recent(db_path: Path, limit: int = 5) -> List[Dict[str, Any]]:
-    init_db(db_path)  # ensure tables exist
-    with sqlite3.connect(db_path) as con:
-        con.execute("PRAGMA foreign_keys=ON")
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute(
-            "SELECT id, kind, vendor_or_employer, total, net_pay, category "
-            "FROM documents ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        rows = cur.fetchall()
-    return [dict(r) for r in rows]
+def update_receipt_fields(
+    conn: sqlite3.Connection, rid: int, row: Dict[str, Any]
+) -> None:
+    """
+    Update parsed fields for an existing receipt by id.
+    Does NOT change norm_hash or raw_text.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE receipts
+        SET vendor=?,
+            date=?,
+            total=?,
+            subtotal=?,
+            tax=?,
+            tip=?,
+            reconciled_used=?,
+            items_subtotal_diff=?,
+            items_subtotal_pct=?
+        WHERE id=?
+        """,
+        (
+            row.get("vendor"),
+            row.get("date"),
+            row.get("total"),
+            row.get("subtotal"),
+            row.get("tax"),
+            row.get("tip"),
+            row.get("reconciled_used", 0),
+            row.get("items_subtotal_diff", 0.0),
+            row.get("items_subtotal_pct", 0.0),
+            rid,
+        ),
+    )
+    conn.commit()
+
+
+def fetch_receipts(conn: sqlite3.Connection, limit: int = 200) -> List[sqlite3.Row]:
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, vendor, date, total, subtotal, tax, tip,
+               reconciled_used, items_subtotal_diff, items_subtotal_pct,
+               norm_hash, raw_text
+        FROM receipts
+        ORDER BY date DESC NULLS LAST, id DESC
+        LIMIT ?
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+def backfill_norm_hashes(conn: sqlite3.Connection, *, has_normalize_fn=None) -> None:
+    from sfa_utils.fingerprint import normalized_text_fingerprint
+
+    cur = conn.cursor()
+    cur.execute("SELECT id, raw_text FROM receipts WHERE norm_hash IS NULL")
+    rows = cur.fetchall()
+    for r in rows:
+        rid, raw = r["id"], r["raw_text"]
+        if not raw:
+            continue
+        text = has_normalize_fn(raw) if has_normalize_fn else raw
+        nh = normalized_text_fingerprint(text)
+        try:
+            cur.execute("UPDATE receipts SET norm_hash=? WHERE id=?", (nh, rid))
+        except sqlite3.IntegrityError:
+            pass
+    conn.commit()

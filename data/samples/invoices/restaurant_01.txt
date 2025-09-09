@@ -1,0 +1,9 @@
+Green Leaf Bistro
+Date: 2025-07-01
+Items:
+- Veg Bowl 1 x 11.00 = 11.00
+- Soda 1 x 2.50 = 2.50
+Subtotal: 13.50
+Tax: 1.11
+Tip: 2.03
+Total: 16.64

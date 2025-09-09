@@ -1,0 +1,9 @@
+Zippy Rides
+Date: 2025-09-01
+Items:
+- Base Fare 1 x 6.00 = 6.00
+- Distance 5 x 1.20 = 6.00
+- Time 10 x 0.20 = 2.00
+Subtotal: 14.00
+Tax: 1.12
+Total: 15.12

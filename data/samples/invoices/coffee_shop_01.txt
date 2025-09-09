@@ -1,0 +1,8 @@
+Starbrew Coffee
+Date: 2025-09-09
+Items:
+- Latte 1 x 4.50 = 4.50
+- Muffin 2 x 2.25 = 4.50
+Subtotal: 9.00
+Tax: 0.81
+Total: 9.81
