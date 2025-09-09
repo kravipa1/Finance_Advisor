@@ -1,10 +1,11 @@
 # parser/extractor.py
 from __future__ import annotations
+
 import argparse
 import json
 import re
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Any, Dict, List, Optional
 
 from parser.doc_type import score as score_doc_type
 from parser.lineitems import extract_line_items
@@ -30,12 +31,11 @@ RE_PO_NO = re.compile(
 
 RE_SUBTOTAL = re.compile(r"\b(?:sub\s*total|subtotal)\b[:\s]*([^\n]+)", re.IGNORECASE)
 RE_TAX = re.compile(r"\b(?:tax|taxes)\b[:\s]*([^\n]+)", re.IGNORECASE)
-RE_SALES_TAX = re.compile(r"\b(?:sales\s*tax)\b[:\s]*([^\n]+)", re.IGNORECASE)
+RE_SALES_TAX = re.compile(r"\b(?:sales?\s*tax)\b[:\s]*([^\n]+)", re.IGNORECASE)
 RE_DISCOUNT = re.compile(
     r"\b(?:discount|promo|coupon|savings)\b[:\s]*([^\n]+)", re.IGNORECASE
 )
 
-# Ignore "Total Items/Savings/Price"
 RE_TOTAL = re.compile(
     r"\b(?:order\s*total|amount\s*due|balance\s*due|total)\b(?!\s*(?:items|savings|price))[:\s]*([^\n]+)",
     re.IGNORECASE,
@@ -45,7 +45,6 @@ RE_RECEIPT_DATE = re.compile(
 )
 RE_RECEIPT_FROM = re.compile(rf"\breceipt\s+from\s+({DATE_RX.pattern})", re.IGNORECASE)
 
-# Prefer price-like amounts (currency symbol or mandatory decimals)
 MONEY_PRICE_RX = re.compile(
     r"(?:[$€₹]|US\$|USD|EUR|INR)\s*-?\d{1,3}(?:,\d{3})*(?:\.\d{2})"
     r"|"
@@ -53,14 +52,20 @@ MONEY_PRICE_RX = re.compile(
     re.IGNORECASE,
 )
 
-# "Total" context bonus; include 'amount' so "Amount 17.94" can help
+# OCR-robust labels
+LBL_TOTAL_FUZZY = re.compile(r"\bt[o0]ta[l1I|]\b", re.I)
+LBL_SUBTOTAL = re.compile(
+    r"\bsub\s*tot[a-z]*\b", re.I
+)  # matches 'subtot', 'subtotal', 'sub total'
+LBL_SALES_TAX = re.compile(r"\b(?:sales?\s*ta[xk]|tax)\b", re.I)
+
 TOTAL_NEAR_RX = re.compile(
-    r"\b(total|amount\s*due|balance\s*due|payable|amount)\b", re.I
+    r"\b(total|grand\s*total|amount\s*due|balance\s*due|payable|amount)\b", re.I
 )
 
-# contexts to avoid choosing as total (added 'calculated')
 NEG_TOTAL_CONTEXT = re.compile(
-    r"(?:items|savings|authorization|auth|change|tip\s?suggest|barcode|reference|subtotal|coupon|price|calculated)",
+    r"(?:item|items|saving|savings|save|saved|authorization|auth|change|tip\s?suggest|barcode|reference|"
+    r"subtotal|coupon|price|calculated|reward|rewards|promo|promotion|offer|points|earned|thanks\s+for\s+shopping)",
     re.IGNORECASE,
 )
 
@@ -91,15 +96,47 @@ def _coalesce(*vals):
     return None
 
 
-# --------------------- labelled totals (bottom-up) ---------------------
+def _window(lines: List[str], i: int, back: int, fwd: int) -> str:
+    lo = max(0, i - back)
+    hi = min(len(lines), i + fwd + 1)
+    return " ".join(s.strip() for s in lines[lo:hi])
+
+
+# --------------------- split-line label grabbers ---------------------
+
+
+def _labelled_amount_split(
+    label_rx: re.Pattern, lines: List[str], look_ahead: int = 5, window: int = 120
+) -> Optional[str]:
+    lo = max(0, len(lines) - window)
+    for i in range(len(lines) - 1, lo - 1, -1):
+        s = " ".join(lines[i].strip().split())
+        if not label_rx.search(s):
+            continue
+        # same line?
+        m0 = MONEY_PRICE_RX.search(s)
+        if m0 and not NEG_TOTAL_CONTEXT.search(_window(lines, i, 1, 1)):
+            return m0.group(0)
+        # next few lines
+        for k in range(1, look_ahead + 1):
+            j = i + k
+            if j >= len(lines):
+                break
+            win = _window(lines, j, 1, 1)
+            if NEG_TOTAL_CONTEXT.search(win):
+                continue
+            m = MONEY_PRICE_RX.search(lines[j])
+            if m:
+                return m.group(0)
+    return None
 
 
 def _labelled_total_from_bottom(lines: List[str]) -> Optional[str]:
-    for raw in reversed(lines[-60:]):
+    for idx, raw in enumerate(reversed(lines[-80:])):
         s = " ".join(raw.strip().split())
-        if not re.search(r"\btotal\b", s, re.I):
+        if not LBL_TOTAL_FUZZY.search(s):
             continue
-        if re.search(r"\b(items|savings|price)\b", s, re.I):
+        if NEG_TOTAL_CONTEXT.search(_window(lines, len(lines) - 1 - idx, 1, 1)):
             continue
         m = MONEY_PRICE_RX.search(s)
         if m:
@@ -108,29 +145,21 @@ def _labelled_total_from_bottom(lines: List[str]) -> Optional[str]:
 
 
 def _labelled_total_split(lines: List[str]) -> Optional[str]:
-    """
-    Find 'Total' on one line and the amount on one of the next two lines.
-    """
-    lo = max(0, len(lines) - 60)
+    lo = max(0, len(lines) - 120)
     for i in range(len(lines) - 1, lo - 1, -1):
         s = " ".join(lines[i].strip().split())
-        if not re.search(r"\btotal\b", s, re.I):
+        if not LBL_TOTAL_FUZZY.search(s):
             continue
-        if re.search(r"\b(items|savings|price)\b", s, re.I):
-            continue
-        # same line?
         m0 = MONEY_PRICE_RX.search(s)
-        if m0:
+        if m0 and not NEG_TOTAL_CONTEXT.search(_window(lines, i, 1, 1)):
             return m0.group(0)
-        # next lines
-        for k in (1, 2):
+        for k in range(1, 6):
             j = i + k
             if j >= len(lines):
                 break
-            nxt = lines[j]
-            if re.search(r"\b(items|savings|price)\b", nxt, re.I):
+            if NEG_TOTAL_CONTEXT.search(_window(lines, j, 2, 2)):
                 continue
-            m = MONEY_PRICE_RX.search(nxt)
+            m = MONEY_PRICE_RX.search(lines[j])
             if m:
                 return m.group(0)
     return None
@@ -157,34 +186,116 @@ def _pick_total_fallback(lines: List[str]) -> Optional[str]:
     hits = _all_amounts_with_lines(lines)
     if not hits:
         return None
-
     n = max(1, len(lines) - 1)
     scored: List[tuple[float, str]] = []
     for i, val, ln, raw, has_symbol in hits:
-        near = " ".join(lines[max(0, i - 1) : min(len(lines), i + 2)])
-        if NEG_TOTAL_CONTEXT.search(ln) or NEG_TOTAL_CONTEXT.search(near):
+        near = _window(lines, i, 6, 6)  # wider neighborhood to exclude 'saved' blocks
+        if NEG_TOTAL_CONTEXT.search(near):
             continue
         depth = i / n
-        tot_bonus = 0.35 if TOTAL_NEAR_RX.search(near) else 0.0
+        tot_bonus = 0.45 if TOTAL_NEAR_RX.search(near) else 0.0
         sym_bonus = 0.15 if has_symbol else 0.0
         mag = min(1.0, (val / 500.0)) ** 0.5
-        score = 0.6 * depth + 0.25 * mag + tot_bonus + sym_bonus
+        score = 0.5 * depth + 0.3 * mag + tot_bonus + sym_bonus
         scored.append((score, raw))
     if not scored:
         return None
     return max(scored, key=lambda t: t[0])[1]
 
 
+# --------------------- block-aware total (after Subtotal/Tax) ---------------------
+
+
+def _last_indices_of(
+    labels: List[re.Pattern], lines: List[str]
+) -> Dict[re.Pattern, int]:
+    idx: Dict[re.Pattern, int] = {}
+    for i, ln in enumerate(lines):
+        for rx in labels:
+            if rx.search(ln):
+                idx[rx] = i
+    return idx
+
+
+def _total_after_subtotaltax(lines: List[str]) -> Optional[str]:
+    idx = _last_indices_of([LBL_SUBTOTAL, LBL_SALES_TAX], lines)
+    if LBL_SUBTOTAL in idx and LBL_SALES_TAX in idx:
+        start = max(idx[LBL_SUBTOTAL], idx[LBL_SALES_TAX])
+        for j in range(start, min(len(lines), start + 12)):
+            win = _window(lines, j, 2, 2)
+            if NEG_TOTAL_CONTEXT.search(win):
+                continue
+            m = MONEY_PRICE_RX.search(lines[j])
+            if m:
+                return m.group(0)
+    return None
+
+
+# --------------------- consistency-based pick ---------------------
+
+
+def _collect_total_candidates(
+    lines: List[str], window: int = 160
+) -> List[tuple[int, float, str, str, bool]]:
+    lo = max(0, len(lines) - window)
+    hits: List[tuple[int, float, str, str, bool]] = []
+    for i in range(lo, len(lines)):
+        ln = lines[i]
+        for m in MONEY_PRICE_RX.finditer(ln):
+            raw = m.group(0)
+            has_symbol = bool(re.match(r"\s*(?:[$€₹]|US\$|USD|EUR|INR)", raw, re.I))
+            a = normalize_amount(raw)
+            if a and a.value is not None:
+                hits.append((i, float(a.value), ln, raw, has_symbol))
+    return hits
+
+
+def _choose_total_with_consistency(
+    subtotal: Dict[str, Any],
+    tax: Dict[str, Any],
+    discount: Dict[str, Any],
+    lines: List[str],
+) -> Optional[str]:
+    s = subtotal.get("value")
+    t = tax.get("value")
+    d = discount.get("value")
+    if s is None or t is None:
+        return None
+    expected = round(
+        (s or 0.0)
+        + (t or 0.0)
+        + ((d if isinstance(d, (int, float)) and d < 0 else 0.0)),
+        2,
+    )
+
+    cands = []
+    for i, val, ln, raw, has_sym in _collect_total_candidates(lines, window=160):
+        hood = _window(lines, i, 6, 6)
+        if NEG_TOTAL_CONTEXT.search(hood):
+            continue
+        diff = abs(val - expected)
+        if diff > 20.0:
+            continue
+        score = (-diff, i, 1 if has_sym else 0)
+        cands.append((score, raw, val))
+    if not cands:
+        return None
+    cands.sort(reverse=True)
+    best_raw, best_val = cands[0][1], cands[0][2]
+    if abs(best_val - expected) <= 1.00:
+        return best_raw
+    return None
+
+
 # --------------------- reconciliation ---------------------
 
 
-def _amount_appears_in_text(value: float, lines: List[str]) -> bool:
-    """Check if a formatted amount (xx.xx) appears anywhere in the text."""
+def _find_value_index(lines: List[str], value: float) -> Optional[int]:
     pat = re.compile(rf"\b{value:.2f}\b")
-    for ln in lines[-120:]:
+    for i, ln in enumerate(lines):
         if pat.search(ln):
-            return True
-    return False
+            return i
+    return None
 
 
 def _reconcile_total(
@@ -194,54 +305,56 @@ def _reconcile_total(
     total: Dict[str, Any],
     lines: List[str],
 ) -> Dict[str, Any]:
-    """
-    Prefer arithmetic if subtotal+tax looks reliable; avoid double-discount.
-    Strategy:
-      - If s and t present, compute EXPECTED_ST = s + t.
-      - If d present, also compute EXPECTED_STD = s + t + d.
-      - If the labelled/fallback total is missing or far from EXPECTED_ST,
-        and EXPECTED_ST appears in text, choose EXPECTED_ST.
-      - Otherwise, if EXPECTED_STD appears and total is missing, choose it.
-    """
     s = subtotal.get("value")
     t = tax.get("value")
     d = discount.get("value")
     tv = total.get("value")
 
-    expected_st = None
-    if s is not None and t is not None:
-        expected_st = round((s or 0.0) + (t or 0.0), 2)
+    expected_st = (
+        round((s or 0.0) + (t or 0.0), 2) if (s is not None and t is not None) else None
+    )
+    expected_std = (
+        round((s or 0.0) + (t or 0.0) + (d or 0.0), 2)
+        if (s is not None and t is not None and d is not None)
+        else None
+    )
 
-    expected_std = None
-    if s is not None and t is not None and d is not None:
-        expected_std = round((s or 0.0) + (t or 0.0) + (d or 0.0), 2)
-
-    # If total missing, try best candidate by presence in text.
-    if tv is None:
-        cand = None
-        if expected_st is not None and _amount_appears_in_text(expected_st, lines):
-            cand = expected_st
-        elif expected_std is not None and _amount_appears_in_text(expected_std, lines):
-            cand = expected_std
-        if cand is not None:
-            ccy = (
-                total.get("currency")
-                or subtotal.get("currency")
-                or tax.get("currency")
-                or discount.get("currency")
-            )
-            return {"raw": f"{cand:.2f}", "value": cand, "currency": ccy}
-        return total
-
-    # If total present but deviates strongly from expected_st (most receipts: total = s + t),
-    # and expected_st appears in text, trust expected_st.
-    if (
-        expected_st is not None
-        and abs(tv - expected_st) > 0.5
-        and _amount_appears_in_text(expected_st, lines)
-    ):
-        ccy = total.get("currency") or subtotal.get("currency") or tax.get("currency")
+    if tv is None and expected_st is not None:
+        ccy = (
+            total.get("currency")
+            or subtotal.get("currency")
+            or tax.get("currency")
+            or discount.get("currency")
+        )
         return {"raw": f"{expected_st:.2f}", "value": expected_st, "currency": ccy}
+    if tv is None and expected_std is not None:
+        ccy = (
+            total.get("currency")
+            or subtotal.get("currency")
+            or tax.get("currency")
+            or discount.get("currency")
+        )
+        return {"raw": f"{expected_std:.2f}", "value": expected_std, "currency": ccy}
+
+    if tv is not None and expected_st is not None and abs(tv - expected_st) > 0.5:
+        idx_tv = _find_value_index(lines, tv)
+        idx_expected = _find_value_index(lines, expected_st)
+        if idx_expected is not None:
+            if (
+                idx_tv is None
+                or idx_expected >= (len(lines) - 15)
+                or idx_expected > (idx_tv + 2)
+            ):
+                ccy = (
+                    total.get("currency")
+                    or subtotal.get("currency")
+                    or tax.get("currency")
+                )
+                return {
+                    "raw": f"{expected_st:.2f}",
+                    "value": expected_st,
+                    "currency": ccy,
+                }
 
     return total
 
@@ -252,14 +365,11 @@ def _reconcile_total(
 def extract_invoice(text: str) -> Dict[str, Any]:
     lines = [ln for ln in text.splitlines() if ln.strip()]
 
-    # vendor (no whitelist)
     vendor = guess_vendor(lines)
 
-    # IDs
     inv_no = _first(RE_INVOICE_NO, text)
     po_no = _first(RE_PO_NO, text)
 
-    # dates (single assignment; includes "receipt from ...")
     invoice_date_raw = _coalesce(
         _first(
             re.compile(
@@ -277,13 +387,27 @@ def extract_invoice(text: str) -> Dict[str, Any]:
     invoice_date = {"raw": invoice_date_raw, "iso": to_iso_date(invoice_date_raw)}
     due_date = {"raw": due_date_raw, "iso": to_iso_date(due_date_raw)}
 
-    # amounts (keyword first)
+    # Prefer Sales Tax first (avoid grabbing "Taxes and Fees")
     subtotal = _amt_json(_first(RE_SUBTOTAL, text))
-    tax = _amt_json(_coalesce(_first(RE_TAX, text), _first(RE_SALES_TAX, text)))
+    tax = _amt_json(_first(RE_SALES_TAX, text))
+    if tax["value"] is None:
+        tax = _amt_json(_first(RE_TAX, text))
     discount = _amt_json(_first(RE_DISCOUNT, text))
     total = _amt_json(_first(RE_TOTAL, text))
 
-    # totals sequence: labelled (same line) → split-line → fallback → reconcile
+    # split-line rescue for subtotal/tax
+    if subtotal["value"] is None:
+        st_split = _labelled_amount_split(LBL_SUBTOTAL, lines, look_ahead=5, window=200)
+        if st_split:
+            subtotal = _amt_json(st_split)
+    if tax["value"] is None:
+        tx_split = _labelled_amount_split(
+            LBL_SALES_TAX, lines, look_ahead=5, window=200
+        )
+        if tx_split:
+            tax = _amt_json(tx_split)
+
+    # totals sequence: labelled (same line) → split-line → after Subtotal/Tax block → consistency → fallback
     if total["value"] is None:
         labelled_bottom = _labelled_total_from_bottom(lines)
         if labelled_bottom:
@@ -293,22 +417,27 @@ def extract_invoice(text: str) -> Dict[str, Any]:
         if split_total:
             total = _amt_json(split_total)
     if total["value"] is None:
+        after_block = _total_after_subtotaltax(lines)
+        if after_block:
+            total = _amt_json(after_block)
+    if total["value"] is None:
+        consistent = _choose_total_with_consistency(subtotal, tax, discount, lines)
+        if consistent:
+            total = _amt_json(consistent)
+    if total["value"] is None:
         fallback = _pick_total_fallback(lines)
         if fallback:
             total = _amt_json(fallback)
 
     total = _reconcile_total(subtotal, tax, discount, total, lines)
 
-    # line items
     line_items = extract_line_items(lines)
 
-    # currency hint
     any_amount = next(
         (a for a in [subtotal, tax, discount, total] if a["currency"]), None
     )
     currency_hint = any_amount["currency"] if any_amount else None
 
-    # sanity
     amount_hits = re.findall(
         r"(?:[$€₹]|US\$|USD|EUR|INR)?\s?-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?", text
     )
@@ -404,9 +533,6 @@ def extract_file(input_txt: Path, outdir: Path) -> Path:
     out = outdir / (Path(input_txt).stem + ".json")
     out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     return out
-
-
-# --------------------- CLI (optional) ---------------------
 
 
 def _cli():
