@@ -7,6 +7,42 @@ from typing import Any, Dict, List, Optional
 from sfa_utils.normalizers import _fix_currency_ocr, normalize_amount
 
 
+AMOUNT = r"(?:\(?-?\$?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?\)?)"
+QTY = r"(?P<qty>\d+)\s*[xX]\s*(?P<unit>\d+(?:\.\d{1,2})?)"
+
+
+def parse_line_items(text: str):
+    items, totals = [], {}
+    for line in text.splitlines():
+        s = line.strip()
+        m = re.search(r"^(?P<name>.+?)\s+" + QTY + r"$", s)
+        if m:
+            name = m.group("name").strip()
+            qty = int(m.group("qty"))
+            unit = float(m.group("unit"))
+            items.append(
+                {
+                    "name": name,
+                    "qty": qty,
+                    "unit_price": unit,
+                    "amount": round(qty * unit, 2),
+                }
+            )
+            continue
+        m2 = re.search(r"^(subtotal|tax|total)\s+(" + AMOUNT + r")$", s, re.I)
+        if m2:
+            key = m2.group(1).lower()
+            totals[key] = _to_float(m2.group(2))
+    return items, totals
+
+
+def _to_float(s: str) -> float:
+    neg = s.startswith("(") and s.endswith(")")
+    s = s.strip("()$ ").replace(",", "")
+    val = float(s)
+    return -val if neg else val
+
+
 # --------- Patterns ---------
 
 # Weighted grocery rows:

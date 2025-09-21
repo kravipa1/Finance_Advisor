@@ -11,6 +11,24 @@ import easyocr
 import cv2
 from math import floor
 
+try:
+    import easyocr
+except Exception:  # will be monkeypatched in tests
+    easyocr = None
+
+
+def _default_reader():
+    if easyocr is None:
+        raise RuntimeError("easyocr not available")
+    return easyocr.Reader(["en"], gpu=False)
+
+
+def read_image_text(path, reader=None) -> str:
+    reader = reader or _default_reader()
+    results = reader.readtext(str(path), detail=1, paragraph=False)
+    lines = [t for _bbox, t, _conf in results]
+    return "\n".join(lines)
+
 
 @dataclass
 class OCRSpan:
