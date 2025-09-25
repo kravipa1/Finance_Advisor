@@ -1,0 +1,20 @@
+# precedence: first match wins
+rules:
+  - name: "Coffee merchants"
+    if_vendor_matches: ["STARBUCKS", "DUNKIN", "PEET'S"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Coffee"
+      tags: ["beverage"]
+      confidence: 0.85
+
+  - name: "Groceries by keywords"
+    if_lineitem_contains: ["milk", "bread", "eggs", "banana"]
+    assign:
+      primary_category: "Groceries"
+      tags: ["essentials"]
+      confidence: 0.70
+
+defaults:
+  primary_category: "Uncategorized"
+  confidence: 0.10
