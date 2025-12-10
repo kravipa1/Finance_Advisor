@@ -1,0 +1,244 @@
+# Smart Finance Advisor - Categorization Rules
+# Higher priority rules are evaluated first (priority: 100 > priority: 50)
+# First matching rule wins
+
+rules:
+  # ============================================================================
+  # HIGH PRIORITY - Specific merchants (priority 100)
+  # ============================================================================
+
+  - name: "Starbucks"
+    priority: 100
+    if_vendor_matches: ["STARBUCKS", "SBUX"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Coffee"
+      confidence: 0.95
+      tags: ["coffee", "beverage"]
+
+  - name: "Dunkin"
+    priority: 100
+    if_vendor_matches: ["DUNKIN", "DUNKIN DONUTS"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Coffee"
+      confidence: 0.95
+      tags: ["coffee", "beverage"]
+
+  - name: "Peets Coffee"
+    priority: 100
+    if_vendor_matches: ["PEET'S", "PEETS"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Coffee"
+      confidence: 0.95
+      tags: ["coffee", "beverage"]
+
+  - name: "McDonalds"
+    priority: 100
+    if_vendor_matches: ["MCDONALD", "MCDONALDS", "MCD"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Fast Food"
+      confidence: 0.95
+      tags: ["fast-food"]
+
+  - name: "Uber Eats"
+    priority: 100
+    if_vendor_matches: ["UBER EATS", "UBEREATS"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Delivery"
+      confidence: 0.95
+      tags: ["delivery", "food-delivery"]
+
+  - name: "DoorDash"
+    priority: 100
+    if_vendor_matches: ["DOORDASH", "DOOR DASH"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Delivery"
+      confidence: 0.95
+      tags: ["delivery", "food-delivery"]
+
+  # ============================================================================
+  # Grocery Stores (priority 90)
+  # ============================================================================
+
+  - name: "Safeway"
+    priority: 90
+    if_vendor_matches: ["SAFEWAY"]
+    assign:
+      primary_category: "Groceries"
+      confidence: 0.90
+      tags: ["supermarket"]
+
+  - name: "Walmart"
+    priority: 90
+    if_vendor_matches: ["WALMART", "WAL-MART", "WAL MART"]
+    assign:
+      primary_category: "Shopping"
+      secondary_category: "Department Store"
+      confidence: 0.85
+      tags: ["retail"]
+
+  - name: "Target"
+    priority: 90
+    if_vendor_matches: ["TARGET"]
+    assign:
+      primary_category: "Shopping"
+      secondary_category: "Department Store"
+      confidence: 0.85
+      tags: ["retail"]
+
+  - name: "Costco"
+    priority: 90
+    if_vendor_matches: ["COSTCO"]
+    assign:
+      primary_category: "Groceries"
+      secondary_category: "Wholesale"
+      confidence: 0.90
+      tags: ["bulk", "warehouse"]
+
+  - name: "Trader Joes"
+    priority: 90
+    if_vendor_matches: ["TRADER JOE", "TRADER JOES", "TJ'S"]
+    assign:
+      primary_category: "Groceries"
+      confidence: 0.90
+      tags: ["supermarket"]
+
+  - name: "Whole Foods"
+    priority: 90
+    if_vendor_matches: ["WHOLE FOODS", "WHOLEFOODS"]
+    assign:
+      primary_category: "Groceries"
+      secondary_category: "Organic"
+      confidence: 0.90
+      tags: ["organic", "supermarket"]
+
+  # ============================================================================
+  # Transportation (priority 85)
+  # ============================================================================
+
+  - name: "Uber Rides"
+    priority: 85
+    if_vendor_matches: ["UBER"]
+    if_lineitem_contains: ["trip", "ride"]
+    assign:
+      primary_category: "Transportation"
+      secondary_category: "Rideshare"
+      confidence: 0.90
+      tags: ["rideshare"]
+
+  - name: "Lyft"
+    priority: 85
+    if_vendor_matches: ["LYFT"]
+    assign:
+      primary_category: "Transportation"
+      secondary_category: "Rideshare"
+      confidence: 0.90
+      tags: ["rideshare"]
+
+  - name: "Gas Stations"
+    priority: 85
+    if_vendor_matches: ["SHELL", "CHEVRON", "EXXON", "MOBIL", "BP", "76", "ARCO", "TEXACO"]
+    if_amount_between: [15, 150]
+    assign:
+      primary_category: "Transportation"
+      secondary_category: "Gas"
+      confidence: 0.85
+      tags: ["fuel", "auto"]
+
+  # ============================================================================
+  # Online Shopping (priority 80)
+  # ============================================================================
+
+  - name: "Amazon"
+    priority: 80
+    if_vendor_matches: ["AMAZON", "AMZN"]
+    assign:
+      primary_category: "Shopping"
+      secondary_category: "Online"
+      confidence: 0.80
+      tags: ["online", "e-commerce"]
+
+  # ============================================================================
+  # Keyword-based rules (priority 50)
+  # ============================================================================
+
+  - name: "Coffee by keywords"
+    priority: 50
+    if_lineitem_contains: ["coffee", "latte", "espresso", "cappuccino", "mocha", "americano"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Coffee"
+      confidence: 0.75
+      tags: ["coffee", "beverage"]
+
+  - name: "Groceries by keywords"
+    priority: 50
+    if_lineitem_contains: ["milk", "bread", "eggs", "banana", "apple", "chicken", "beef", "produce", "deli", "bakery", "vegetables", "fruit"]
+    assign:
+      primary_category: "Groceries"
+      confidence: 0.70
+      tags: ["essentials"]
+
+  - name: "Restaurant by keywords"
+    priority: 50
+    if_lineitem_contains: ["appetizer", "entree", "dessert", "waiter", "server", "gratuity"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Restaurant"
+      confidence: 0.70
+      tags: ["dining"]
+
+  - name: "Pharmacy by keywords"
+    priority: 50
+    if_lineitem_contains: ["prescription", "rx", "pharmacy", "medicine", "drug"]
+    assign:
+      primary_category: "Healthcare"
+      secondary_category: "Pharmacy"
+      confidence: 0.75
+      tags: ["medical"]
+
+  # ============================================================================
+  # Amount-based tagging rules (priority 20)
+  # These add tags but don't override categories
+  # ============================================================================
+
+  - name: "Large purchase"
+    priority: 20
+    if_amount_gt: 500
+    assign:
+      primary_category: null  # Won't match if no vendor/keyword
+      confidence: 0.3
+      tags: ["large-purchase", "review"]
+
+  - name: "Small purchase"
+    priority: 20
+    if_amount_lt: 5
+    assign:
+      primary_category: null
+      confidence: 0.3
+      tags: ["small-purchase"]
+
+  # ============================================================================
+  # Fallback generic rules (priority 10)
+  # ============================================================================
+
+  - name: "Generic restaurant"
+    priority: 10
+    if_lineitem_contains: ["tip", "subtotal", "tax"]
+    if_vendor_matches: ["BISTRO", "CAFE", "GRILL", "KITCHEN", "RESTAURANT", "DINER"]
+    assign:
+      primary_category: "Food & Drink"
+      secondary_category: "Restaurant"
+      confidence: 0.60
+      tags: ["dining"]
+
+defaults:
+  primary_category: "Uncategorized"
+  secondary_category: null
+  confidence: 0.10
+  tags: []
